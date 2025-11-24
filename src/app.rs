@@ -95,7 +95,7 @@ impl Rasterization {
     }
 
     /**
-     * Edge Function: 한 점이 특정 변(edge)에 대해 어느 쪽에 있는지 판별합니다.
+     * Edge Function: 한 점이 특정 변(edge)에 대해 어느 쪽에 있는지 판별
      * 2D 벡터의 외적(cross product)의 z 성분과 같습니다.
      * P = (x, y)
      * V0 = (x0, y0)
