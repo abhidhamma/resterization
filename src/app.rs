@@ -94,14 +94,8 @@ impl Rasterization {
         )
     }
 
-    /**
+    /*
      * Edge Function: 한 점이 특정 변(edge)에 대해 어느 쪽에 있는지 판별
-     * 2D 벡터의 외적(cross product)의 z 성분과 같습니다.
-     * P = (x, y)
-     * V0 = (x0, y0)
-     * V1 = (x1, y1)
-     * 결과 = (x - x0) * (y1 - y0) - (y - y0) * (x1 - x0)
-     *
      * 결과 > 0: 점이 반시계 방향으로 감은 변의 안쪽에 있음
      * 결과 < 0: 점이 변의 바깥쪽에 있음
      * 결과 = 0: 점이 변 위에 있음
@@ -112,22 +106,14 @@ impl Rasterization {
         a.x * b.y - a.y * b.x
     }
 
-    /**
-     * 래스터라이제이션: 가상의 삼각형으로 구성된 3차원 대상을 모니터에 투영합니다.
-     *
-     * 삼각형을 사용하는 이유:
-     * 1. 평면성 보장: 3개의 점은 항상 하나의 평면을 만듭니다.
-     * 2. 볼록성: 내부가 항상 볼록하여 픽셀 채우기 알고리즘이 단순해집니다.
-     * 3. 보간의 명확성: 무게중심 좌표계를 사용하여 삼각형 내부 모든 점의 속성(색상 등)을 명확하게 보간할 수 있습니다.
-     * 4. 기본 단위: 모든 다각형은 삼각형으로 분해할 수 있습니다.
-     */
+    // 래스터라이제이션: 가상의 삼각형으로 구성된 3차원 대상을 모니터에 투영
     fn render(&self, pixels: &mut [Color32]) {
-        /* World 좌표계의 정점들을 Screen Raster 좌표계로 변환 */
+        //월드좌표계의 정점들을 화면좌표계로 변환
         let v0_raster = self.project_world_to_raster(self.triangle.v0.pos);
         let v1_raster = self.project_world_to_raster(self.triangle.v1.pos);
         let v2_raster = self.project_world_to_raster(self.triangle.v2.pos);
 
-        /* 삼각형을 감싸는 최소 사각형(Bounding Box)을 계산하여 탐색 범위를 줄입니다. */
+        // 삼각형을 감싸는 최소 사각형을 계산하여 탐색 범위 줄이기
         let x_min = (v0_raster.x.min(v1_raster.x.min(v2_raster.x)))
             .floor()
             .max(0.0) as usize;
@@ -141,22 +127,17 @@ impl Rasterization {
             .ceil()
             .min(self.height as f32 - 1.0) as usize;
 
-        /* Bounding Box 내의 모든 픽셀을 순회합니다. */
+        // 바운딩박스 내부의 모든 픽셀 순회
         for j in y_min..=y_max {
             for i in x_min..=x_max {
                 let point = Pos2::new(i as f32, j as f32);
 
-                /*
-                 * 무게중심 좌표계 (Barycentric Coordinates)
-                 * C++ 원본과 동일한 순서로 Edge Function을 호출합니다.
-                 */
+                // 삼각형 내부에 있는지 판별
                 let alpha0 = Self::edge_function(v1_raster, v2_raster, point);
                 let alpha1 = Self::edge_function(v2_raster, v0_raster, point);
                 let alpha2 = Self::edge_function(v0_raster, v1_raster, point);
 
-                /*
-                 * 세 개의 edge function 결과가 모두 양수(또는 0)이면 픽셀은 삼각형 내부에 있습니다.
-                 */
+                // 세 개의 edge function 결과가 모두 양수(또는 0)이면 픽셀은 삼각형 내부에 있음
                 if alpha0 >= 0.0 && alpha1 >= 0.0 && alpha2 >= 0.0 {
                     let area = alpha0 + alpha1 + alpha2;
                     if area == 0.0 {
@@ -167,7 +148,7 @@ impl Rasterization {
                     let w1 = alpha1 / area;
                     let w2 = alpha2 / area;
 
-                    /* 무게중심 좌표를 이용해 각 정점의 색상을 보간(interpolate)합니다. */
+                    // 무게중심 좌표를 이용해 각 정점의 색상을 선형보간
                     let r = (w0 * self.triangle.v0.color.r() as f32
                         + w1 * self.triangle.v1.color.r() as f32
                         + w2 * self.triangle.v2.color.r() as f32) as u8;
@@ -178,7 +159,7 @@ impl Rasterization {
                         + w1 * self.triangle.v1.color.b() as f32
                         + w2 * self.triangle.v2.color.b() as f32) as u8;
 
-                    /* 계산된 색상으로 픽셀을 칠합니다. */
+                    // 계산된 색상으로 픽셀 색칠하기
                     let index = i + j * self.width;
                     if index < pixels.len() {
                         pixels[index] = Color32::from_rgb(r, g, b);
