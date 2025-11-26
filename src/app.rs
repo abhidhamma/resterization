@@ -1,8 +1,8 @@
 // h:\coding\rustWorkspace\graphics\resterization\src\app.rs
 
 use eframe::egui;
-use egui::{Color32, ColorImage, Pos2, Resize, ScrollArea, TextureHandle, Ui, vec2};
-use glam::{Mat3, Vec3, vec2 as glam_vec2, vec3};
+use egui::{Color32, ColorImage, Pos2, TextureHandle, Ui};
+use glam::{Vec3, vec2 as glam_vec2, vec3};
 
 /**
  * C++의 Mesh 클래스에 해당
@@ -113,18 +113,22 @@ impl Rasterization {
         }
     }
 
-    // 2차원 변환: GPU의 버텍스 셰이더가 하는 일과 매우 유사함
+    /**
+     * C++의 Rasterization::Update()와 동일한 로직으로 수정.
+     * 행렬을 사용하지 않고, 각 정점에 변환을 순차적으로 적용.
+     * 이 과정은 GPU의 버텍스 셰이더가 하는 일과 매우 유사합니다.
+     */
     fn update(&mut self) {
         for i in 0..self.circle.vertices.len() {
-            // 1. 오브젝트 중심 회전
+            // 1. 오브젝트 중심 회전 (R1)
             let mut temp = rotate_about_z(self.circle.vertices[i], self.rotation1);
-            // 2. 크기 조절
+            // 2. 크기 조절 (S)
             temp *= vec3(self.scale_x, self.scale_y, 1.0);
-            // 3. 오브젝트 이동
+            // 3. 오브젝트 이동 (T1)
             temp += self.translation1;
-            // 4. 원점 중심 회전
+            // 4. 씬(원점) 중심 회전 (R2)
             temp = rotate_about_z(temp, self.rotation2);
-            // 5. 축 전체 이동
+            // 5. 씬(전체) 이동 (T2)
             temp += self.translation2;
 
             self.vertex_buffer[i] = temp;
@@ -316,41 +320,41 @@ impl RasterizationApp {
 }
 
 impl eframe::App for RasterizationApp {
+    /**
+     * 매 프레임 호출되는 업데이트 함수
+     * 반응형 UI를 위해 로직을 수정
+     */
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        /* 1. 변환 값에 따라 정점 위치 업데이트 */
-        self.rasterization.update();
-
-        /* 2. 픽셀 버퍼 생성 및 래스터화 수행 */
-        let mut image = ColorImage::filled(
-            [self.rasterization.width, self.rasterization.height],
-            Color32::BLACK,
-        );
-        self.rasterization.render(&mut image.pixels);
-
-        /* 3. 픽셀 버퍼를 텍스처로 변환하여 화면에 표시 준비 */
-        self.texture.set(image, Default::default());
-
-        /* 4. ImGui에 해당하는 egui UI 컨트롤 생성 */
+        /* 1. UI 컨트롤 창을 먼저 정의 */
         egui::Window::new("Scene Control").show(ctx, |ui| {
             self.show_controls(ui);
         });
 
-        /* 5. 텍스처를 화면 중앙에 그림 (반응형 UI 적용) */
+        /* 2. 나머지 중앙 패널 영역을 렌더링 공간으로 사용 */
         egui::CentralPanel::default().show(ctx, |ui| {
-            ScrollArea::both().show(ui, |ui| {
-                Resize::default()
-                    .default_size(vec2(
-                        self.rasterization.width as f32,
-                        self.rasterization.height as f32,
-                    ))
-                    .min_size(vec2(320.0, 240.0))
-                    .show(ui, |ui| {
-                        ui.image(&self.texture);
-                    });
-            });
+            /* 3. 사용 가능한 공간의 크기를 가져옴 */
+            let available_size = ui.available_size();
+            let (width, height) = (available_size.x as usize, available_size.y as usize);
+
+            /* 4. 래스터라이저의 크기를 현재 UI 크기에 맞게 업데이트 */
+            self.rasterization.width = width;
+            self.rasterization.height = height;
+
+            /* 5. 변환 값에 따라 정점 위치 업데이트 */
+            self.rasterization.update();
+
+            /* 6. 새 크기에 맞는 픽셀 버퍼 생성 및 래스터화 수행 */
+            let mut image = ColorImage::filled([width, height], Color32::BLACK);
+            self.rasterization.render(&mut image.pixels);
+
+            /* 7. 픽셀 버퍼를 텍스처로 변환하여 화면에 표시 */
+            self.texture.set(image, Default::default());
+
+            /* 8. 이미지를 UI에 추가. available_size를 사용하여 공간을 꽉 채움 */
+            ui.image((self.texture.id(), available_size));
         });
 
-        /* 6. 다음 프레임을 위해 다시 그리도록 요청 (애니메이션) */
+        /* 9. 다음 프레임을 위해 다시 그리도록 요청 (애니메이션) */
         ctx.request_repaint();
     }
 }
