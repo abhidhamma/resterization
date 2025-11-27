@@ -2,11 +2,10 @@
 
 use eframe::egui;
 use egui::{Color32, ColorImage, Pos2, TextureHandle, Ui};
-use glam::{Vec3, vec2 as glam_vec2, vec3};
+use glam::{Vec3, vec3};
 
 /**
- * C++의 Mesh 클래스에 해당
- * 원과 같은 기하학적 도형의 원본 데이터를 보관
+ * 각 천체(태양, 지구, 달)의 원본 데이터를 보관
  */
 struct Mesh {
     vertices: Vec<Vec3>,
@@ -16,42 +15,38 @@ struct Mesh {
 
 impl Mesh {
     /**
-     * 원의 기하학적 정보를 생성
-     * C++의 Mesh::InitCircle 함수와 동일한 로직
+     * 원의 기하학적 정보 생성 및 색상 지정
      */
-    fn new_circle(center: Vec3, radius: f32, num_triangles: usize) -> Self {
-        let mut vertices = Vec::new();
-        let mut colors = Vec::new();
-        let mut indices = Vec::new();
+    fn new_circle(radius: f32, num_triangles: usize, color: Vec3) -> Self {
+        let mut vertices = Vec::with_capacity(num_triangles + 1);
+        let mut colors = Vec::with_capacity(num_triangles + 1);
+        let mut indices = Vec::with_capacity(num_triangles * 3);
 
-        /* 필요한 메모리 미리 할당 */
-        vertices.reserve(num_triangles + 1);
-        colors.reserve(num_triangles + 1);
-        indices.reserve(num_triangles * 3);
-
-        /* 중심점 추가 */
-        vertices.push(center);
-        colors.push(vec3(1.0, 0.0, 0.0)); // Red
+        // 중심점은 원점(0,0,0)으로 고정 (인덱스 0)
+        vertices.push(Vec3::ZERO);
+        colors.push(color);
 
         let two_pi = 2.0 * std::f32::consts::PI;
         let delta_theta = two_pi / num_triangles as f32;
 
-        /* 가장자리 정점 추가 */
+        // 가장자리 정점 추가 (인덱스 1 ~ num_triangles)
         for i in 0..num_triangles {
             let theta = i as f32 * delta_theta;
-            vertices.push(center + vec3(theta.cos() * radius, theta.sin() * radius, 0.0));
-            colors.push(vec3(0.0, 0.0, 1.0)); // Blue
+            vertices.push(vec3(theta.cos() * radius, theta.sin() * radius, 0.0));
+            colors.push(color);
         }
 
-        /* 인덱스 정의 (반시계 방향, CCW) - C++ 코드와 동일하게 수정 */
+        // 인덱스 정의 (반시계 방향, CCW)
         for i in 0..num_triangles {
             indices.push(0); // 중심점
-            indices.push(if i == num_triangles - 1 {
-                1 // 마지막 삼각형은 첫 번째 가장자리 정점과 연결
+
+            if i == num_triangles - 1 {
+                indices.push(1); // 마지막 삼각형은 첫 번째 가장자리 정점과 연결
             } else {
-                i + 2
-            });
-            indices.push(i + 1);
+                indices.push(i + 2); // 다음 가장자리 정점
+            }
+
+            indices.push(i + 1); // 현재 가장자리 정점
         }
 
         Self {
@@ -63,101 +58,195 @@ impl Mesh {
 }
 
 /**
- * C++의 Rasterization 클래스에 해당
- * 변환, 래스터화 등 핵심 로직 담당
+ * 태양계 애니메이션과 래스터화 로직 담당
  */
 struct Rasterization {
     width: usize,
     height: usize,
-    circle: Mesh, // 원본 도형 데이터
 
-    /* 변환(Transform)을 위한 데이터 */
-    translation1: Vec3,
-    translation2: Vec3,
-    rotation1: f32,
-    rotation2: f32,
-    scale_x: f32,
-    scale_y: f32,
+    // 각 천체의 원본 데이터
+    sun: Mesh,
+    earth: Mesh,
+    moon: Mesh,
 
-    /* 변환이 적용된 후의 정점, 색상, 인덱스 버퍼 */
-    vertex_buffer: Vec<Vec3>,
-    color_buffer: Vec<Vec3>,
-    index_buffer: Vec<usize>,
+    // 애니메이션 상태 변수
+    earth_angle: f32,
+    earth_angular_velocity: f32,
+    moon_angle: f32,
+    moon_angular_velocity: f32,
+
+    // 천체 간 거리
+    dist_sun_to_earth: f32,
+    dist_earth_to_moon: f32,
+
+    /**
+     * 변환된 정점을 담기 위한 임시 버퍼.
+     * 매 프레임 재사용하여 불필요한 메모리 할당을 줄임.
+     */
+    transformed_vertices: Vec<Vec3>,
 }
 
 impl Rasterization {
     fn new(width: usize, height: usize) -> Self {
-        let circle = Mesh::new_circle(vec3(0.0, 0.0, 1.0), 0.3, 5); // 오각형으로 수정
-
-        /*
-         * C++ 코드처럼 원본 데이터를 버퍼에 복사
-         * Update()에서 원본(circle)을 사용해 계산한 결과를 이 버퍼들에 저장
-         */
-        let vertex_buffer = circle.vertices.clone();
-        let color_buffer = circle.colors.clone();
-        let index_buffer = circle.indices.clone();
-
         Self {
             width,
             height,
-            circle,
-            translation1: Vec3::ZERO,
-            translation2: Vec3::ZERO,
-            rotation1: 0.0,
-            rotation2: 0.0,
-            scale_x: 1.0,
-            scale_y: 1.0,
-            vertex_buffer,
-            color_buffer,
-            index_buffer,
+            sun: Mesh::new_circle(0.1, 20, vec3(1.0, 1.0, 0.0)), // Yellow
+            earth: Mesh::new_circle(0.05, 20, vec3(0.0, 0.0, 1.0)), // Blue
+            moon: Mesh::new_circle(0.02, 20, vec3(1.0, 1.0, 1.0)), // White
+            earth_angle: 0.0,
+            earth_angular_velocity: 0.3,
+            moon_angle: 0.0,
+            moon_angular_velocity: 1.0,
+            dist_sun_to_earth: 0.5,
+            dist_earth_to_moon: 0.2,
+            transformed_vertices: Vec::new(),
         }
     }
 
     /**
-     * C++의 Rasterization::Update()와 동일한 로직으로 수정.
-     * 행렬을 사용하지 않고, 각 정점에 변환을 순차적으로 적용.
-     * 이 과정은 GPU의 버텍스 셰이더가 하는 일과 매우 유사합니다.
+     * 애니메이션 상태 업데이트
      */
-    fn update(&mut self) {
-        for i in 0..self.circle.vertices.len() {
-            // 1. 오브젝트 중심 회전 (R1)
-            let mut temp = rotate_about_z(self.circle.vertices[i], self.rotation1);
-            // 2. 크기 조절 (S)
-            temp *= vec3(self.scale_x, self.scale_y, 1.0);
-            // 3. 오브젝트 이동 (T1)
-            temp += self.translation1;
-            // 4. 씬(원점) 중심 회전 (R2)
-            temp = rotate_about_z(temp, self.rotation2);
-            // 5. 씬(전체) 이동 (T2)
-            temp += self.translation2;
+    fn update_animation(&mut self, dt: f32) {
+        self.earth_angle += self.earth_angular_velocity * dt;
+        self.moon_angle += self.moon_angular_velocity * dt;
+    }
 
-            self.vertex_buffer[i] = temp;
+    /*
+     * 각 천체를 순서대로 변환하고 그림
+     */
+    fn render(&mut self, pixels: &mut [Color32]) {
+        // 1. 태양 그리기: 월드좌표계 원점
+        self.draw_mesh(&self.sun.vertices, &self.sun, pixels);
+
+        // 2. 지구 그리기: x축이동 + 원점(태양)중심 회전
+        self.transformed_vertices.clear();
+        for v in &self.earth.vertices {
+            let earth_pos = *v + vec3(self.dist_sun_to_earth, 0.0, 0.0);
+            self.transformed_vertices
+                .push(rotate_about_z(earth_pos, self.earth_angle));
+        }
+        // 변환된 정점 데이터와 원본 지구 메쉬(&self.earth)를 함께 넘기기
+        self.draw_mesh(&self.transformed_vertices, &self.earth, pixels);
+
+        // 3. 달 그리기: 지구그리기(x축이동 + 원점중심 회전) + 객체(지구) 중심 회전
+        self.transformed_vertices.clear();
+        for v in &self.moon.vertices {
+            let moon_relative_to_earth = *v + vec3(self.dist_earth_to_moon, 0.0, 0.0);
+            let moon_rotated_around_earth = rotate_about_z(moon_relative_to_earth, self.moon_angle);
+            let moon_pos_in_solar_system =
+                moon_rotated_around_earth + vec3(self.dist_sun_to_earth, 0.0, 0.0);
+            self.transformed_vertices
+                .push(rotate_about_z(moon_pos_in_solar_system, self.earth_angle));
+        }
+        // 변환된 정점 데이터와 원본 달 메쉬(&self.moon)를 함께 넘겨 그림
+        self.draw_mesh(&self.transformed_vertices, &self.moon, pixels);
+    }
+
+    /**
+     * 중복 로직을 처리하기 위해 추가된 헬퍼(Helper) 함수.
+     * 주어진 정점들과 메쉬 정보를 이용해 삼각형들을 그림.
+     */
+    fn draw_mesh(&self, vertices: &[Vec3], mesh: &Mesh, pixels: &mut [Color32]) {
+        // 메쉬가 가진 인덱스 버퍼의 길이만큼 3칸씩(삼각형 하나) 건너뛰며 반복
+        for i in (0..mesh.indices.len()).step_by(3) {
+            // `draw_indexed_triangle` 함수에 필요한 모든 정보를 '참조'로 넘김
+            self.draw_indexed_triangle(vertices, &mesh.indices, &mesh.colors, i, pixels);
         }
     }
 
     /**
-     * C++의 Rasterization::Render() 함수에 해당
-     * 인덱스 버퍼를 순회하며 모든 삼각형을 그림
-     * 이 부분이 이번 학습의 핵심입니다.
+     * 인덱스를 사용하여 삼각형 하나를 그림
      */
-    fn render(&self, pixels: &mut [Color32]) {
-        /*
-         * 인덱스 버퍼(index_buffer)는 삼각형을 구성하는 정점들의 '주소' 목록
-         * 3개씩 묶어서 하나의 삼각형을 정의 (예: [0, 1, 2, 0, 2, 3, ...])
-         * step_by(3)을 사용해 3칸씩 건너뛰며 각 삼각형의 시작 인덱스(i)를 가져옴
-         */
-        for i in (0..self.index_buffer.len()).step_by(3) {
-            self.draw_indexed_triangle(i, pixels);
+    fn draw_indexed_triangle(
+        &self,
+        vertices: &[Vec3],      // 그릴 삼각형의 정점 데이터 (변환 완료)
+        indices: &[usize],      // 정점을 연결하는 인덱스 데이터
+        colors: &[Vec3],        // 각 정점의 색상 데이터
+        start_index: usize,     // 인덱스 버퍼에서 현재 삼각형이 시작되는 위치
+        pixels: &mut [Color32], // 최종 픽셀 색상을 기록할 버퍼
+    ) {
+        // 1. 현재 삼각형을 구성하는 세 정점의 인덱스를 가져옴
+        let i0 = indices[start_index];
+        let i1 = indices[start_index + 1];
+        let i2 = indices[start_index + 2];
+
+        // 2. 인덱스를 사용해 3D 월드 좌표계의 정점 위치를 가져온 후, 2D 화면 좌표로 변환
+        let v0 = self.project_world_to_raster(vertices[i0]);
+        let v1 = self.project_world_to_raster(vertices[i1]);
+        let v2 = self.project_world_to_raster(vertices[i2]);
+
+        // 3. 각 정점에 해당하는 색상 정보를 가져옴
+        let c0 = colors[i0];
+        let c1 = colors[i1];
+        let c2 = colors[i2];
+
+        // 4. 삼각형을 감싸는 최소한의 사각형(Bounding Box)을 계산
+        let x_min = (v0.x.min(v1.x.min(v2.x)))
+            .floor()
+            .max(0.0)
+            .min((self.width - 1) as f32) as usize;
+        let y_min = (v0.y.min(v1.y.min(v2.y)))
+            .floor()
+            .max(0.0)
+            .min((self.height - 1) as f32) as usize;
+        let x_max = (v0.x.max(v1.x.max(v2.x)))
+            .ceil()
+            .max(0.0)
+            .min((self.width - 1) as f32) as usize;
+        let y_max = (v0.y.max(v1.y.max(v2.y)))
+            .ceil()
+            .max(0.0)
+            .min((self.height - 1) as f32) as usize;
+
+        // 5. Bounding Box 내의 모든 픽셀을 순회
+        for j in y_min..=y_max {
+            for i in x_min..=x_max {
+                // 현재 검사할 픽셀의 중심 좌표
+                let point = Pos2::new(i as f32 + 0.5, j as f32 + 0.5);
+
+                // 6. Edge Function을 사용해 현재 픽셀이 삼각형의 각 변(edge)의 '안쪽'에 있는지 검사
+                let alpha0 = Self::edge_function(v1, v2, point);
+                let alpha1 = Self::edge_function(v2, v0, point);
+                let alpha2 = Self::edge_function(v0, v1, point);
+
+                // 7. 세 개의 Edge Function 결과가 모두 0 이상이면, 픽셀은 삼각형 내부에 존재
+                if alpha0 >= 0.0 && alpha1 >= 0.0 && alpha2 >= 0.0 {
+                    // 8. 무게 중심 좌표(Barycentric Coordinates)를 계산
+                    let area = alpha0 + alpha1 + alpha2;
+                    if area == 0.0 {
+                        continue; // 면적이 0이면 계산을 건너뜀
+                    }
+
+                    // 각 정점의 가중치(alpha, beta, gamma)를 계산
+                    let alpha = alpha0 / area;
+                    let beta = alpha1 / area;
+                    let gamma = alpha2 / area;
+
+                    // 9. 계산된 가중치를 이용해 세 정점의 색상을 보간하여 현재 픽셀의 최종 색상을 결정
+                    let color = alpha * c0 + beta * c1 + gamma * c2;
+
+                    // 10. 계산된 색상(f32)을 Color32(u8)로 변환하여 픽셀 버퍼에 기록
+                    let r = (color.x.clamp(0.0, 1.0) * 255.0) as u8;
+                    let g = (color.y.clamp(0.0, 1.0) * 255.0) as u8;
+                    let b = (color.z.clamp(0.0, 1.0) * 255.0) as u8;
+
+                    // 픽셀 버퍼의 1차원 인덱스 계산 및 색상 쓰기
+                    let index = i + j * self.width;
+                    if index < pixels.len() {
+                        pixels[index] = Color32::from_rgb(r, g, b);
+                    }
+                }
+            }
         }
     }
 
     /**
      * 3차원 월드 좌표를 2차원 래스터(화면) 좌표로 변환
-     * C++ 버전의 `ProjectWorldToRaster`와 동일한 로직
      */
     fn project_world_to_raster(&self, point: Vec3) -> Pos2 {
         let aspect = self.width as f32 / self.height as f32;
-        let point_ndc = glam_vec2(point.x / aspect, point.y);
+        let point_ndc = glam::vec2(point.x / aspect, point.y);
 
         let x_scale = 2.0 / self.width as f32;
         let y_scale = 2.0 / self.height as f32;
@@ -169,82 +258,14 @@ impl Rasterization {
     }
 
     /**
-     * Edge Function: 한 점이 특정 변(edge)에 대해 어느 쪽에 있는지 판별
-     * C++ 버전의 `EdgeFunction`과 동일
+     * Edge Function
      */
-    fn edge_function(v0: Pos2, v1: Pos2, point: Pos2) -> f32 {
-        let a = v1 - v0;
-        let b = point - v0;
-        a.x * b.y - a.y * b.x
-    }
-
-    /**
-     * 인덱스를 사용하여 삼각형 하나를 그림
-     * C++ 버전의 `DrawIndexedTriangle`과 동일한 로직
-     */
-    fn draw_indexed_triangle(&self, start_index: usize, pixels: &mut [Color32]) {
-        /* 1. 인덱스 버퍼에서 현재 삼각형을 구성하는 정점 인덱스 3개를 가져옴 */
-        let i0 = self.index_buffer[start_index];
-        let i1 = self.index_buffer[start_index + 1];
-        let i2 = self.index_buffer[start_index + 2];
-
-        /* 2. 정점 버퍼와 색상 버퍼에서 해당 인덱스의 실제 데이터(위치, 색상)를 가져옴 */
-        let v0_raster = self.project_world_to_raster(self.vertex_buffer[i0]);
-        let v1_raster = self.project_world_to_raster(self.vertex_buffer[i1]);
-        let v2_raster = self.project_world_to_raster(self.vertex_buffer[i2]);
-
-        let c0 = self.color_buffer[i0];
-        let c1 = self.color_buffer[i1];
-        let c2 = self.color_buffer[i2];
-
-        /* 3. 삼각형을 감싸는 최소 사각형(Bounding Box) 계산 */
-        let x_min = (v0_raster.x.min(v1_raster.x.min(v2_raster.x)))
-            .floor()
-            .max(0.0) as usize;
-        let x_max = (v0_raster.x.max(v1_raster.x.max(v2_raster.x)))
-            .ceil()
-            .min(self.width as f32 - 1.0) as usize;
-        let y_min = (v0_raster.y.min(v1_raster.y.min(v2_raster.y)))
-            .floor()
-            .max(0.0) as usize;
-        let y_max = (v0_raster.y.max(v1_raster.y.max(v2_raster.y)))
-            .ceil()
-            .min(self.height as f32 - 1.0) as usize;
-
-        /* 4. 바운딩 박스 내 모든 픽셀을 순회하며 삼각형 내부에 있는지 검사 */
-        for j in y_min..=y_max {
-            for i in x_min..=x_max {
-                let point = Pos2::new(i as f32, j as f32);
-
-                /* Edge Function을 이용해 픽셀이 삼각형 내부에 있는지 판별 */
-                let alpha0 = Self::edge_function(v1_raster, v2_raster, point);
-                let alpha1 = Self::edge_function(v2_raster, v0_raster, point);
-                let alpha2 = Self::edge_function(v0_raster, v1_raster, point);
-
-                if alpha0 >= 0.0 && alpha1 >= 0.0 && alpha2 >= 0.0 {
-                    let area = alpha0 + alpha1 + alpha2;
-                    if area == 0.0 {
-                        continue;
-                    }
-
-                    /* 5. 무게중심 좌표를 이용해 색상 보간 및 픽셀 채색 */
-                    let color_vec = (alpha0 * c0 + alpha1 * c1 + alpha2 * c2) / area;
-
-                    let r = (color_vec.x * 255.0) as u8;
-                    let g = (color_vec.y * 255.0) as u8;
-                    let b = (color_vec.z * 255.0) as u8;
-
-                    let index = i + j * self.width;
-                    if index < pixels.len() {
-                        pixels[index] = Color32::from_rgb(r, g, b);
-                    }
-                }
-            }
-        }
+    fn edge_function(v0: Pos2, v1: Pos2, p: Pos2) -> f32 {
+        (v1.x - v0.x) * (p.y - v0.y) - (v1.y - v0.y) * (p.x - v0.x)
     }
 }
 
-/*
+/**
  * 원점(z축)을 기준으로 2차원 회전
  */
 fn rotate_about_z(v: Vec3, theta: f32) -> Vec3 {
@@ -256,8 +277,7 @@ fn rotate_about_z(v: Vec3, theta: f32) -> Vec3 {
 }
 
 /**
- * C++의 Example 클래스와 main() 함수의 역할을 합친 구조체
- * eframe::App 트레이트를 구현하여 GUI 애플리케이션의 상태를 관리하고 렌더링 로직을 실행
+ * eframe::App 구현체
  */
 pub struct RasterizationApp {
     rasterization: Rasterization,
@@ -282,79 +302,50 @@ impl RasterizationApp {
     }
 
     /**
-     * 요청하신 순서대로 UI 컨트롤을 표시하는 함수
+     * UI 컨트롤
      */
     fn show_controls(&mut self, ui: &mut Ui) {
-        ui.label("object translation");
         ui.add(
-            egui::Slider::new(&mut self.rasterization.translation1.x, -1.0..=1.0)
-                .text("Translation X"),
+            egui::Slider::new(&mut self.rasterization.earth_angular_velocity, 0.0..=2.0)
+                .text("Earth Angular Velocity"),
         );
         ui.add(
-            egui::Slider::new(&mut self.rasterization.translation1.y, -1.0..=1.0)
-                .text("Translation Y"),
-        );
-        ui.add(egui::Slider::new(&mut self.rasterization.scale_x, -2.0..=2.0).text("Scale X"));
-        ui.add(egui::Slider::new(&mut self.rasterization.scale_y, -2.0..=2.0).text("Scale Y"));
-        ui.add(
-            egui::Slider::new(&mut self.rasterization.rotation1, -3.141592..=3.141592)
-                .text("Rotation (Object)"),
-        );
-
-        ui.separator();
-
-        ui.label("axis translation");
-        ui.add(
-            egui::Slider::new(&mut self.rasterization.rotation2, -3.141592..=3.141592)
-                .text("Rotation (Axis)"),
-        );
-        ui.add(
-            egui::Slider::new(&mut self.rasterization.translation2.x, -1.0..=1.0)
-                .text("Axis Translate X"),
-        );
-        ui.add(
-            egui::Slider::new(&mut self.rasterization.translation2.y, -1.0..=1.0)
-                .text("Axis Translate Y"),
+            egui::Slider::new(&mut self.rasterization.moon_angular_velocity, 0.0..=5.0)
+                .text("Moon Angular Velocity"),
         );
     }
 }
 
 impl eframe::App for RasterizationApp {
-    /**
-     * 매 프레임 호출되는 업데이트 함수
-     * 반응형 UI를 위해 로직을 수정
-     */
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        /* 1. UI 컨트롤 창을 먼저 정의 */
         egui::Window::new("Scene Control").show(ctx, |ui| {
             self.show_controls(ui);
         });
 
-        /* 2. 나머지 중앙 패널 영역을 렌더링 공간으로 사용 */
         egui::CentralPanel::default().show(ctx, |ui| {
-            /* 3. 사용 가능한 공간의 크기를 가져옴 */
             let available_size = ui.available_size();
             let (width, height) = (available_size.x as usize, available_size.y as usize);
 
-            /* 4. 래스터라이저의 크기를 현재 UI 크기에 맞게 업데이트 */
+            if width == 0 || height == 0 {
+                return;
+            }
+
+            // 래스터라이저의 크기를 현재 UI 크기에 맞게 업데이트
             self.rasterization.width = width;
             self.rasterization.height = height;
 
-            /* 5. 변환 값에 따라 정점 위치 업데이트 */
-            self.rasterization.update();
+            // 애니메이션 상태 업데이트
+            self.rasterization
+                .update_animation(ctx.input(|i| i.stable_dt));
 
-            /* 6. 새 크기에 맞는 픽셀 버퍼 생성 및 래스터화 수행 */
             let mut image = ColorImage::filled([width, height], Color32::BLACK);
             self.rasterization.render(&mut image.pixels);
 
-            /* 7. 픽셀 버퍼를 텍스처로 변환하여 화면에 표시 */
             self.texture.set(image, Default::default());
 
-            /* 8. 이미지를 UI에 추가. available_size를 사용하여 공간을 꽉 채움 */
             ui.image((self.texture.id(), available_size));
         });
 
-        /* 9. 다음 프레임을 위해 다시 그리도록 요청 (애니메이션) */
         ctx.request_repaint();
     }
 }
